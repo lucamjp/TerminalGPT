@@ -1,0 +1,12 @@
+{
+  "editor.formatOnSave": false,
+  "files.exclude": {
+    "**/.build": true,
+    "**/build": true
+  },
+  "search.exclude": {
+    "**/.build": true,
+    "**/build": true
+  },
+  "swift.path": "/usr/bin/swift"
+}

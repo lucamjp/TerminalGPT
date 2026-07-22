@@ -1,0 +1,44 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build: Beta (Debug)",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/build.sh",
+      "args": ["debug", "beta"],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": "$swiftc"
+    },
+    {
+      "label": "Run: Beta (Debug)",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/run-beta.sh",
+      "dependsOn": "Build: Beta (Debug)",
+      "problemMatcher": []
+    },
+    {
+      "label": "Build: Main (Debug, nicht installieren)",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/build.sh",
+      "args": ["debug", "main"],
+      "problemMatcher": "$swiftc"
+    },
+    {
+      "label": "Typecheck",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/typecheck.sh",
+      "group": "test",
+      "problemMatcher": "$swiftc"
+    },
+    {
+      "label": "Build: Selection Probe",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/build-selection-probe.sh",
+      "group": "test",
+      "problemMatcher": "$swiftc"
+    }
+  ]
+}

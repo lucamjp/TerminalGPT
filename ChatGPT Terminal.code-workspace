@@ -1,0 +1,18 @@
+{
+  "folders": [
+    {
+      "name": "ChatGPT Terminal",
+      "path": "."
+    }
+  ],
+  "settings": {
+    "files.exclude": {
+      "**/.build": true,
+      "**/build": true
+    },
+    "search.exclude": {
+      "**/.build": true,
+      "**/build": true
+    }
+  }
+}
