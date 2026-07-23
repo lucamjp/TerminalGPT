@@ -2,6 +2,8 @@
 
 A small fully-LLM-produced floating ChatGPT client for macOS with a terminal-style interface. uses signed-in ChatGPT web session (login stays in macOS WebKit data store). No API. There are some features like search (cmd F), two color themes, file input, screenshot shortcut, text "copy paste" shortcut, conversation history, command line "\new" for new chat, command line "\cd last" for last found chat", command line "\clear” for fresh terminal. MacOS will ask for permission that the client can use the shortcut stuff.
 
+<img width="817" height="813" alt="image" src="https://github.com/user-attachments/assets/7f8c310d-426b-470e-a4a3-f1e6c49b9ea5" />
+
 Current version: **3.3.3 (Build 34)**
 
 If current `chatgpt.com` UI changes then it will probably break in some features. You can just ask LLM to update it.
