@@ -29,6 +29,8 @@ swift build
 
 ## Some shortcuts
 
+| Shortcut | Action |
+| --- | --- |
 | `⌥ Space` | Show or hide |
 | `⌥⇧4` | Capture a screenshot |
 | `⌘ Return` | Send |
