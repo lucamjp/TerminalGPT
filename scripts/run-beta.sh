@@ -9,6 +9,5 @@ if [[ ! -d "$APP_PATH" ]]; then
     "$ROOT_DIR/scripts/build.sh" debug beta
 fi
 
-# Startet ausschließlich die Entwicklungs-Beta. Die installierte Hauptversion
-# wird weder beendet noch verändert.
+# Starts only the development beta. It does not stop or replace the installed app.
 /usr/bin/open -n "$APP_PATH"

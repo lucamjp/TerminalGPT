@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIGURATION="${1:-debug}"
-VARIANT="${2:-beta}"
+VARIANT="${2:-main}"
 
 case "$CONFIGURATION" in
     debug)
@@ -14,7 +14,7 @@ case "$CONFIGURATION" in
         OPTIMIZATION_FLAGS=(-O)
         ;;
     *)
-        echo "Unbekannte Konfiguration: $CONFIGURATION (erlaubt: debug, release)" >&2
+        echo "Unknown configuration: $CONFIGURATION (use debug or release)" >&2
         exit 2
         ;;
 esac
@@ -31,7 +31,7 @@ case "$VARIANT" in
         VARIANT_FLAGS=(-D BETA_BUILD)
         ;;
     *)
-        echo "Unbekannte Variante: $VARIANT (erlaubt: main, beta)" >&2
+        echo "Unknown variant: $VARIANT (use main or beta)" >&2
         exit 2
         ;;
 esac
@@ -39,6 +39,7 @@ esac
 BUILD_DIR="$ROOT_DIR/build/$VARIANT-$CONFIGURATION"
 APP_DIR="$BUILD_DIR/$APP_NAME.app"
 EXECUTABLE_PATH="$APP_DIR/Contents/MacOS/$APP_NAME"
+SOURCE_FILES=("$ROOT_DIR"/Sources/ChatGPTTerminal/*.swift)
 
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources" "$BUILD_DIR/module-cache"
@@ -48,7 +49,7 @@ mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources" "$BUILD_DIR/mod
     "${OPTIMIZATION_FLAGS[@]}" \
     "${VARIANT_FLAGS[@]}" \
     -module-cache-path "$BUILD_DIR/module-cache" \
-    "$ROOT_DIR/main.swift" \
+    "${SOURCE_FILES[@]}" \
     -framework AppKit \
     -framework ApplicationServices \
     -framework Carbon \
@@ -58,24 +59,38 @@ mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources" "$BUILD_DIR/mod
     -o "$EXECUTABLE_PATH"
 
 cp "$INFO_PLIST" "$APP_DIR/Contents/Info.plist"
-xattr -cr "$APP_DIR"
+
+sign_app() {
+    local attempt
+    for attempt in 1 2 3; do
+        xattr -cr "$APP_DIR"
+        if "$@"; then
+            return 0
+        fi
+    done
+    return 1
+}
 
 SIGN_MODE="${SIGN_MODE:-adhoc}"
 case "$SIGN_MODE" in
     adhoc)
-        /usr/bin/codesign --force --deep --sign - "$APP_DIR"
+        sign_app /usr/bin/codesign --force --deep --sign - "$APP_DIR"
         ;;
     local)
-        SIGN_IDENTITY="${SIGN_IDENTITY:-1F15E8DBAC0A533607CA5AEFF0320416EE2BFD87}"
-        SIGN_KEYCHAIN="${SIGN_KEYCHAIN:-$HOME/Library/Keychains/ChatGPTTerminalLocalSigning.keychain-db}"
-        /usr/bin/codesign --force --deep --sign "$SIGN_IDENTITY" --keychain "$SIGN_KEYCHAIN" "$APP_DIR"
+        : "${SIGN_IDENTITY:?Set SIGN_IDENTITY when SIGN_MODE=local}"
+        if [[ -n "${SIGN_KEYCHAIN:-}" ]]; then
+            sign_app /usr/bin/codesign --force --deep --sign "$SIGN_IDENTITY" --keychain "$SIGN_KEYCHAIN" "$APP_DIR"
+        else
+            sign_app /usr/bin/codesign --force --deep --sign "$SIGN_IDENTITY" "$APP_DIR"
+        fi
         ;;
     none)
         ;;
     *)
-        echo "Unbekannter SIGN_MODE: $SIGN_MODE (erlaubt: adhoc, local, none)" >&2
+        echo "Unknown SIGN_MODE: $SIGN_MODE (use adhoc, local, or none)" >&2
         exit 2
         ;;
 esac
 
+xattr -cr "$APP_DIR"
 echo "$APP_DIR"

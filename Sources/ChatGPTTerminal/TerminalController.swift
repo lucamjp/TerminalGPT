@@ -1,169 +1,12 @@
 import AppKit
 import ApplicationServices
 import Carbon
-import PDFKit
 import UniformTypeIdentifiers
 import WebKit
 
-private let hotKeySignature: OSType = 0x54525633 // TRV3
-
-#if BETA_BUILD
-private let terminalPanelTitle = "ChatGPT Terminal Beta 3.3.2 (Build 33)"
-private let terminalAddress = "chatgpt://terminal/v3-beta"
-private let selectionShortcutLabel = "⌃⌥⇧C"
-#else
-private let terminalPanelTitle = "ChatGPT Terminal 3.3.3 (Build 34)"
-private let terminalAddress = "chatgpt://terminal/v3"
-private let selectionShortcutLabel = "⌘⇧C"
-#endif
-
-private enum HotKeyID: UInt32 {
-    case window = 1
-    case screenshot = 2
-    case copyLatest = 3
-    case send = 4
-    case captureSelection = 5
-}
-
-private struct PendingAttachment {
-    let data: Data
-    let pasteboardType: NSPasteboard.PasteboardType
-    let preview: NSImage
-    let fileName: String
-    let mimeType: String
-}
-
-private func imageAttachment(from image: NSImage, fileName: String = "clipboard-image.png") -> PendingAttachment? {
-    guard let tiff = image.tiffRepresentation,
-          let bitmap = NSBitmapImageRep(data: tiff),
-          let png = bitmap.representation(using: .png, properties: [:]) else { return nil }
-    return PendingAttachment(data: png, pasteboardType: .png, preview: image, fileName: fileName, mimeType: "image/png")
-}
-
-private func pdfAttachment(from data: Data, fileName: String = "clipboard-document.pdf") -> PendingAttachment? {
-    guard let document = PDFDocument(data: data), let firstPage = document.page(at: 0) else { return nil }
-    let preview = firstPage.thumbnail(of: NSSize(width: 180, height: 180), for: .cropBox)
-    return PendingAttachment(data: data, pasteboardType: .pdf, preview: preview, fileName: fileName, mimeType: "application/pdf")
-}
-
-private final class TerminalInputView: NSTextView {
-    var attachmentsDidChange: (([PendingAttachment]) -> Void)?
-    var historyNavigationRequested: ((Int) -> Void)?
-    var sendRequested: (() -> Void)?
-    private(set) var pendingAttachments: [PendingAttachment] = []
-
-    override func keyDown(with event: NSEvent) {
-        let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
-        if modifiers.isEmpty, event.keyCode == UInt16(kVK_UpArrow) {
-            historyNavigationRequested?(-1)
-            return
-        }
-        if modifiers.isEmpty, event.keyCode == UInt16(kVK_DownArrow) {
-            historyNavigationRequested?(1)
-            return
-        }
-        if modifiers.isEmpty, event.keyCode == UInt16(kVK_Return) {
-            sendRequested?()
-            return
-        }
-        super.keyDown(with: event)
-    }
-
-    override func paste(_ sender: Any?) {
-        let board = NSPasteboard.general
-        if importAttachments(from: board) { return }
-        super.paste(sender)
-    }
-
-    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        canImportAttachments(from: sender.draggingPasteboard) ? .copy : super.draggingEntered(sender)
-    }
-
-    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        importAttachments(from: sender.draggingPasteboard) || super.performDragOperation(sender)
-    }
-
-    func clearAll() {
-        string = ""
-        pendingAttachments.removeAll()
-        attachmentsDidChange?(pendingAttachments)
-    }
-
-    func setAttachments(_ attachments: [PendingAttachment]) {
-        pendingAttachments = attachments
-        attachmentsDidChange?(pendingAttachments)
-    }
-
-    private func canImportAttachments(from board: NSPasteboard) -> Bool {
-        let imageTypes: [NSPasteboard.PasteboardType] = [
-            .png, .tiff,
-            NSPasteboard.PasteboardType("public.jpeg"),
-            NSPasteboard.PasteboardType("public.heic"),
-            NSPasteboard.PasteboardType("org.webmproject.webp")
-        ]
-        return board.availableType(from: imageTypes + [.pdf]) != nil ||
-            board.canReadObject(forClasses: [NSImage.self, NSURL.self], options: [.urlReadingFileURLsOnly: true])
-    }
-
-    @discardableResult
-    private func importAttachments(from board: NSPasteboard) -> Bool {
-        var imported: [PendingAttachment] = []
-
-        if let data = board.data(forType: .pdf), let item = pdfAttachment(from: data) {
-            imported.append(item)
-        }
-
-        let imageTypes: [NSPasteboard.PasteboardType] = [
-            .png, .tiff,
-            NSPasteboard.PasteboardType("public.jpeg"),
-            NSPasteboard.PasteboardType("public.heic"),
-            NSPasteboard.PasteboardType("org.webmproject.webp")
-        ]
-        if let type = board.availableType(from: imageTypes),
-           let data = board.data(forType: type),
-           let image = NSImage(data: data),
-           let item = imageAttachment(from: image) {
-            imported.append(item)
-        }
-
-        if imported.isEmpty, let objects = board.readObjects(forClasses: [NSImage.self], options: nil) as? [NSImage] {
-            for image in objects {
-                if let item = imageAttachment(from: image) { imported.append(item) }
-            }
-        }
-
-        if imported.isEmpty, let image = NSImage(pasteboard: board), let item = imageAttachment(from: image) {
-            imported.append(item)
-        }
-
-        if let urls = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] {
-            for url in urls {
-                let type = UTType(filenameExtension: url.pathExtension)
-                if type?.conforms(to: .pdf) == true,
-                   let data = try? Data(contentsOf: url),
-                   let item = pdfAttachment(from: data, fileName: url.lastPathComponent) {
-                    imported.append(item)
-                } else if type?.conforms(to: .image) == true,
-                          let image = NSImage(contentsOf: url),
-                          let item = imageAttachment(from: image, fileName: url.deletingPathExtension().lastPathComponent + ".png") {
-                    imported.append(item)
-                }
-            }
-        }
-
-        var seen = Set<String>()
-        imported = imported.filter { attachment in
-            let key = "\(attachment.mimeType)|\(attachment.data.count)|\(attachment.data.hashValue)"
-            return seen.insert(key).inserted
-        }
-        guard !imported.isEmpty else { return false }
-        pendingAttachments.append(contentsOf: imported)
-        attachmentsDidChange?(pendingAttachments)
-        return true
-    }
-}
-
 final class TerminalController: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler, NSTextViewDelegate, NSSearchFieldDelegate {
+    // MARK: Windows and views
+
     private let panel: NSPanel
     private let transcriptView: WKWebView
     private let sessionView: WKWebView
@@ -177,14 +20,19 @@ final class TerminalController: NSObject, NSWindowDelegate, WKNavigationDelegate
     private let searchResultLabel = NSTextField(labelWithString: "")
     private let sessionWindow: NSWindow
     private let hiddenSessionHost = NSView()
+
+    // MARK: Keyboard shortcuts
+
     private var hotKeyRef: EventHotKeyRef?
     private var screenshotHotKeyRef: EventHotKeyRef?
     private var copyHotKeyRef: EventHotKeyRef?
     private var sendHotKeyRef: EventHotKeyRef?
     private var captureSelectionHotKeyRef: EventHotKeyRef?
-    private var captureSelectionHotKeyRegistrationStatus: OSStatus = -1
     private var eventHandler: EventHandlerRef?
     private var keyMonitor: Any?
+
+    // MARK: Conversation state
+
     private var userInteractionGeneration = 0
     private var lockHandled = false
     private var isSending = false
@@ -205,6 +53,9 @@ final class TerminalController: NSObject, NSWindowDelegate, WKNavigationDelegate
     private var terminalDocumentReady = false
     private var windowShortcut = "⌥ Leertaste"
     private var screenshotShortcut = "⌥⇧4"
+
+    // MARK: Local state
+
     private var inputHistory = UserDefaults.standard.stringArray(forKey: "ChatGPTTerminalInputHistory") ?? []
     private var historyIndex: Int?
     private var historyDraft = ""
@@ -228,6 +79,8 @@ final class TerminalController: NSObject, NSWindowDelegate, WKNavigationDelegate
     private var readyStatusText: String {
         "Bereit · \(windowShortcut) · Screenshot \(screenshotShortcut)"
     }
+
+    // MARK: Lifecycle
 
     override init() {
         let terminalConfig = WKWebViewConfiguration()
@@ -284,6 +137,8 @@ final class TerminalController: NSObject, NSWindowDelegate, WKNavigationDelegate
         DistributedNotificationCenter.default().removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
+
+    // MARK: Window layout
 
     private func configurePanel() {
         panel.title = terminalPanelTitle
@@ -553,6 +408,8 @@ final class TerminalController: NSObject, NSWindowDelegate, WKNavigationDelegate
         return button
     }
 
+    // MARK: Theme
+
     @objc private func themeChanged() {
         UserDefaults.standard.set(themePopup.titleOfSelectedItem ?? "Dunkel", forKey: "ChatGPTTerminalTheme")
         applyTheme()
@@ -593,6 +450,8 @@ final class TerminalController: NSObject, NSWindowDelegate, WKNavigationDelegate
         evaluateTerminal("terminal.setTheme(\(Self.jsString(blue ? "blue" : "dark")))")
     }
 
+    // MARK: ChatGPT session
+
     private func configureSessionWindow() {
         sessionWindow.title = "ChatGPT-Sitzung — V3 Hintergrund"
         sessionWindow.isReleasedWhenClosed = false
@@ -613,6 +472,8 @@ final class TerminalController: NSObject, NSWindowDelegate, WKNavigationDelegate
         sessionView.frame = NSRect(x: 0, y: 0, width: 980, height: 760)
         hiddenSessionHost.addSubview(sessionView)
     }
+
+    // MARK: Keyboard shortcuts
 
     private func configureHotKeys() {
         var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: OSType(kEventHotKeyPressed))
@@ -661,7 +522,7 @@ final class TerminalController: NSObject, NSWindowDelegate, WKNavigationDelegate
 #else
         let captureSelectionModifiers = UInt32(cmdKey | shiftKey)
 #endif
-        captureSelectionHotKeyRegistrationStatus = RegisterEventHotKey(
+        RegisterEventHotKey(
             UInt32(kVK_ANSI_C),
             captureSelectionModifiers,
             captureSelectionID,
@@ -730,6 +591,8 @@ final class TerminalController: NSObject, NSWindowDelegate, WKNavigationDelegate
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(screenUnlocked), name: NSWorkspace.sessionDidBecomeActiveNotification, object: nil)
     }
 
+    // MARK: Session loading
+
     private func loadTerminalDocument() {
         transcriptView.loadHTMLString(Self.terminalHTML, baseURL: URL(string: "https://cdn.jsdelivr.net/"))
     }
@@ -756,6 +619,8 @@ final class TerminalController: NSObject, NSWindowDelegate, WKNavigationDelegate
         }
         sessionView.load(URLRequest(url: url))
     }
+
+    // MARK: Window actions
 
     func showWindow() {
         NSApp.activate(ignoringOtherApps: true)
@@ -787,6 +652,8 @@ final class TerminalController: NSObject, NSWindowDelegate, WKNavigationDelegate
     @objc private func scrollTranscriptToBottom() {
         evaluateTerminal("terminal.jumpToBottom()")
     }
+
+    // MARK: Transcript search
 
     @objc private func toggleSearchBar() {
         if isSearchVisible {
@@ -841,6 +708,8 @@ final class TerminalController: NSObject, NSWindowDelegate, WKNavigationDelegate
         let index = (payload["index"] as? NSNumber)?.intValue ?? 0
         searchResultLabel.stringValue = "\(index + 1) / \(count)"
     }
+
+    // MARK: Text capture and clipboard
 
     @objc private func captureSelectedText() {
         guard AXIsProcessTrusted() else {
@@ -1019,142 +888,8 @@ final class TerminalController: NSObject, NSWindowDelegate, WKNavigationDelegate
         inputView.scrollRangeToVisible(inputView.selectedRange())
     }
 
-#if BETA_BUILD
-    func runExternalSelectionSelfTest() {
-        let previousApplication = NSWorkspace.shared.frontmostApplication
-        let sentinel = "EXTERNAL_SELECTION_PROBE_91C4"
-        inputView.string = ""
-        panel.orderOut(nil)
-        let probe = Process()
-        probe.executableURL = URL(fileURLWithPath: "/private/tmp/ChatGPT Selection Probe")
-        do {
-            try probe.run()
-        } catch {
-            let report = "probe_started=false\nresult=FAIL\n"
-            try? report.write(
-                to: URL(fileURLWithPath: "/private/tmp/chatgpt-terminal-beta-external-selection-test.txt"),
-                atomically: true,
-                encoding: .utf8
-            )
-            return
-        }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
-            guard let self else { return }
-            let probeApplication = NSRunningApplication(processIdentifier: probe.processIdentifier)
-            probeApplication?.activate(options: [.activateAllWindows])
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
-                guard let self else { return }
-                let externalFocused = NSWorkspace.shared.frontmostApplication?.processIdentifier == probe.processIdentifier
-                let terminalUnfocused = !NSApp.isActive && !self.panel.isKeyWindow
-                let source = CGEventSource(stateID: .hidSystemState)
-                let down = source.flatMap { CGEvent(keyboardEventSource: $0, virtualKey: CGKeyCode(kVK_ANSI_C), keyDown: true) }
-                let up = source.flatMap { CGEvent(keyboardEventSource: $0, virtualKey: CGKeyCode(kVK_ANSI_C), keyDown: false) }
-                down?.flags = [.maskControl, .maskAlternate, .maskShift]
-                up?.flags = [.maskControl, .maskAlternate, .maskShift]
-                down?.post(tap: .cgSessionEventTap)
-                up?.post(tap: .cgSessionEventTap)
-
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                    guard let self else { return }
-                    let captured = self.inputView.string == sentinel
-                    let focusStayedExternal = NSWorkspace.shared.frontmostApplication?.processIdentifier == probe.processIdentifier
-                    let trusted = AXIsProcessTrusted()
-                    let hotKeyPassed = self.captureSelectionHotKeyRegistrationStatus == noErr
-                    let passed = trusted && hotKeyPassed && externalFocused && terminalUnfocused && captured && focusStayedExternal
-                    let report = [
-                        "trusted=\(trusted)",
-                        "hotkey_registered=\(hotKeyPassed)",
-                        "external_app_focused=\(externalFocused)",
-                        "terminal_unfocused=\(terminalUnfocused)",
-                        "text_captured=\(captured)",
-                        "focus_stayed_external=\(focusStayedExternal)",
-                        "result=\(passed ? "PASS" : "FAIL")"
-                    ].joined(separator: "\n") + "\n"
-                    try? report.write(
-                        to: URL(fileURLWithPath: "/private/tmp/chatgpt-terminal-beta-external-selection-test.txt"),
-                        atomically: true,
-                        encoding: .utf8
-                    )
-                    probe.terminate()
-                    previousApplication?.activate(options: [])
-                }
-            }
-        }
-    }
-
-    func runSelectionSelfTest() {
-        let previousApplication = NSWorkspace.shared.frontmostApplication
-        let sentinel = "TERMINAL_BETA_SELECTION_7F3A"
-        showWindow()
-        inputView.string = sentinel
-        inputView.setSelectedRange(NSRange(location: 0, length: (sentinel as NSString).length))
-        panel.makeFirstResponder(inputView)
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-            guard let self else { return }
-            let trusted = AXIsProcessTrusted()
-            let accessibilityValue = self.accessibilitySelectedText()
-            let accessibilityPassed = accessibilityValue == sentinel
-
-            let pasteboard = NSPasteboard.general
-            let oldCount = pasteboard.changeCount
-            let oldItems: [[NSPasteboard.PasteboardType: Data]] = (pasteboard.pasteboardItems ?? []).map { item in
-                Dictionary(uniqueKeysWithValues: item.types.compactMap { type in
-                    item.data(forType: type).map { (type, $0) }
-                })
-            }
-            let source = CGEventSource(stateID: .hidSystemState)
-            let down = source.flatMap { CGEvent(keyboardEventSource: $0, virtualKey: CGKeyCode(kVK_ANSI_C), keyDown: true) }
-            let up = source.flatMap { CGEvent(keyboardEventSource: $0, virtualKey: CGKeyCode(kVK_ANSI_C), keyDown: false) }
-            down?.flags = .maskCommand
-            up?.flags = .maskCommand
-            down?.postToPid(ProcessInfo.processInfo.processIdentifier)
-            up?.postToPid(ProcessInfo.processInfo.processIdentifier)
-
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-                guard let self else { return }
-                let copiedValue = self.textFromPasteboard(pasteboard)
-                let clipboardPassed = pasteboard.changeCount != oldCount && copiedValue == sentinel
-                self.restorePasteboard(oldItems)
-                let hotKeyPassed = self.captureSelectionHotKeyRegistrationStatus == noErr
-                self.inputView.string = sentinel
-                self.inputView.setSelectedRange(NSRange(location: 0, length: (sentinel as NSString).length))
-                self.panel.makeFirstResponder(self.inputView)
-                let shortcutSource = CGEventSource(stateID: .hidSystemState)
-                let shortcutDown = shortcutSource.flatMap { CGEvent(keyboardEventSource: $0, virtualKey: CGKeyCode(kVK_ANSI_C), keyDown: true) }
-                let shortcutUp = shortcutSource.flatMap { CGEvent(keyboardEventSource: $0, virtualKey: CGKeyCode(kVK_ANSI_C), keyDown: false) }
-                shortcutDown?.flags = [.maskControl, .maskAlternate, .maskShift]
-                shortcutUp?.flags = [.maskControl, .maskAlternate, .maskShift]
-                shortcutDown?.post(tap: .cgSessionEventTap)
-                shortcutUp?.post(tap: .cgSessionEventTap)
-
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in
-                    guard let self else { return }
-                    let endToEndPassed = self.inputView.string == sentinel + "\n" + sentinel
-                    let passed = trusted && hotKeyPassed && accessibilityPassed && clipboardPassed && endToEndPassed
-                    let report = [
-                        "trusted=\(trusted)",
-                        "hotkey_registered=\(hotKeyPassed)",
-                        "accessibility_selection=\(accessibilityPassed)",
-                        "targeted_copy=\(clipboardPassed)",
-                        "end_to_end_hotkey=\(endToEndPassed)",
-                        "result=\(passed ? "PASS" : "FAIL")"
-                    ].joined(separator: "\n") + "\n"
-                    try? report.write(
-                        to: URL(fileURLWithPath: "/private/tmp/chatgpt-terminal-beta-selection-test.txt"),
-                        atomically: true,
-                        encoding: .utf8
-                    )
-                    self.inputView.string = ""
-                    self.panel.orderOut(nil)
-                    previousApplication?.activate(options: [])
-                }
-            }
-        }
-    }
-#endif
-
+    // Copies ChatGPT's source text instead of the rendered terminal output.
     @objc func copyLatestResponse() {
         let pasteboard = NSPasteboard.general
         let previousChangeCount = pasteboard.changeCount
@@ -1192,6 +927,8 @@ final class TerminalController: NSObject, NSWindowDelegate, WKNavigationDelegate
             }
         }
     }
+
+    // MARK: Conversation navigation
 
     @objc private func showSession() {
         NSApp.activate(ignoringOtherApps: true)
@@ -1336,6 +1073,8 @@ final class TerminalController: NSObject, NSWindowDelegate, WKNavigationDelegate
         }
     }
 
+    // MARK: Attachments
+
     @objc private func chooseAttachments() {
         let picker = NSOpenPanel()
         picker.allowsMultipleSelection = true
@@ -1408,6 +1147,8 @@ final class TerminalController: NSObject, NSWindowDelegate, WKNavigationDelegate
             showWindow()
         }
     }
+
+    // MARK: Message submission
 
     @objc private func sendMessage() {
         let text = inputView.string.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1545,6 +1286,8 @@ final class TerminalController: NSObject, NSWindowDelegate, WKNavigationDelegate
         restoreComposerFocus()
     }
 
+    // MARK: Uploads
+
     private func ensurePromptAvailable(completion: @escaping (Bool) -> Void) {
         sessionView.evaluateJavaScript(Self.promptExistsScript) { result, _ in
             completion(result as? Bool ?? false)
@@ -1669,6 +1412,8 @@ final class TerminalController: NSObject, NSWindowDelegate, WKNavigationDelegate
             }
         }
     }
+
+    // MARK: ChatGPT bridge
 
     private func insertTextAndSubmit(_ text: String, generation: Int) {
         let script = Self.prepareMessageScript(text: text)
@@ -1838,6 +1583,8 @@ final class TerminalController: NSObject, NSWindowDelegate, WKNavigationDelegate
         }
     }
 
+    // MARK: Terminal rendering
+
     private func evaluateTerminal(_ script: String) {
         transcriptView.evaluateJavaScript(script, completionHandler: nil)
     }
@@ -1914,6 +1661,8 @@ final class TerminalController: NSObject, NSWindowDelegate, WKNavigationDelegate
         }
     }
 
+    // MARK: WebKit delegates
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         if webView === transcriptView {
             terminalDocumentReady = true
@@ -1979,6 +1728,8 @@ final class TerminalController: NSObject, NSWindowDelegate, WKNavigationDelegate
         picker.begin { response in completionHandler(response == .OK ? picker.urls : nil) }
     }
 
+    // MARK: System events
+
     @objc private func screenLocked() {
         guard !lockHandled else { return }
         lockHandled = true
@@ -1998,850 +1749,4 @@ final class TerminalController: NSObject, NSWindowDelegate, WKNavigationDelegate
         }
     }
 
-    private static func jsString(_ value: String) -> String {
-        guard let data = try? JSONSerialization.data(withJSONObject: [value]),
-              let encoded = String(data: data, encoding: .utf8) else { return "\"\"" }
-        return "\(encoded).at(0)"
-    }
-
-    private static func userMessageHTML(text: String, attachmentCount: Int) -> String {
-        let escaped = text
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
-            .replacingOccurrences(of: "\n", with: "<br>")
-        let badge = attachmentCount > 0 ? "<span class='image-badge'>▣ \(attachmentCount) Datei\(attachmentCount == 1 ? "" : "en")</span>" : ""
-        return escaped + (escaped.isEmpty || badge.isEmpty ? "" : "<br>") + badge
-    }
-
-    private static let promptExistsScript = """
-    (() => !!(document.querySelector('#prompt-textarea') || document.querySelector('textarea') || document.querySelector('[contenteditable="true"]')))()
-    """
-
-    private static let focusPromptScript = """
-    (() => {
-      const p = document.querySelector('#prompt-textarea') || document.querySelector('textarea') || document.querySelector('[contenteditable="true"]');
-      if (!p) return false; p.focus(); return true;
-    })()
-    """
-
-    private static let previousChatURLScript = """
-    (() => {
-      const normalize = raw => {
-        try {
-          const url = new URL(raw, location.href);
-          return url.pathname.replace(/\\/$/, '');
-        } catch (_) { return ''; }
-      };
-      const currentPath = normalize(location.href);
-      const candidates = [...document.querySelectorAll('a[href*="/c/"]')];
-      const seen = new Set();
-      const chats = candidates.filter(anchor => {
-        const path = normalize(anchor.href);
-        if (!path.includes('/c/') || seen.has(path)) return false;
-        seen.add(path);
-        return true;
-      });
-      let activeIndex = chats.findIndex(anchor => normalize(anchor.href) === currentPath);
-      if (activeIndex < 0) {
-        activeIndex = chats.findIndex(anchor => anchor.getAttribute('aria-current') === 'page' || anchor.dataset.active === 'true');
-      }
-      if (activeIndex >= 0 && activeIndex + 1 < chats.length) {
-        const target = chats[activeIndex + 1];
-        return {ok:true, url:new URL(target.href, location.href).href, title:(target.textContent || '').trim()};
-      }
-      if (activeIndex < 0) {
-        const target = chats.find(anchor => normalize(anchor.href) !== currentPath);
-        if (target) return {ok:true, url:new URL(target.href, location.href).href, title:(target.textContent || '').trim()};
-      }
-      const buttons = [...document.querySelectorAll('button')];
-      const sidebarButton = buttons.find(button => {
-        const description = ((button.getAttribute('aria-label') || '') + ' ' + (button.getAttribute('title') || '')).toLowerCase();
-        return /open.*sidebar|sidebar.*open|seitenleiste.*öffnen|menü.*öffnen/.test(description);
-      });
-      if (sidebarButton) {
-        sidebarButton.click();
-        return {ok:false, retry:true};
-      }
-      return {ok:false, reason:'no-next-sidebar-chat'};
-    })()
-    """
-
-    private static let conversationImportScript = """
-    (() => {
-      if (!location.pathname.includes('/c/')) return {ready:false};
-      const nodes = [...document.querySelectorAll('[data-message-author-role="user"], [data-message-author-role="assistant"]')];
-      if (!nodes.length) return {ready:false};
-      const signature = nodes.length + ':' + ((nodes.at(-1)?.textContent || '').length);
-      if (window.__terminalImportSignature !== signature) {
-        window.__terminalImportSignature = signature;
-        window.__terminalImportStableSince = Date.now();
-        return {ready:false};
-      }
-      if (Date.now() - (window.__terminalImportStableSince || 0) < 1200) return {ready:false};
-      const cleanHTML = (node, role) => {
-        const content = role === 'assistant'
-          ? (node.querySelector('.markdown, [class*="markdown"]') || node)
-          : (node.querySelector('[class*="whitespace-pre-wrap"], [data-message-content]') || node);
-        const clone = content.cloneNode(true);
-        clone.querySelectorAll('script, style, button, [contenteditable="true"]').forEach(element => element.remove());
-        clone.querySelectorAll('*').forEach(element => {
-          [...element.attributes].forEach(attribute => {
-            if (/^on/i.test(attribute.name) || ['data-state','contenteditable'].includes(attribute.name)) element.removeAttribute(attribute.name);
-          });
-        });
-        return clone.innerHTML.trim();
-      };
-      const messages = nodes.map(node => {
-        const role = node.getAttribute('data-message-author-role');
-        return {role, html:cleanHTML(node, role)};
-      }).filter(message => message.html);
-      if (!messages.length) return {ready:false};
-      const latestAssistant = [...nodes].reverse().find(node => node.getAttribute('data-message-author-role') === 'assistant');
-      const modelNode = latestAssistant?.matches?.('[data-message-model-slug], [data-model-slug], [data-model]')
-        ? latestAssistant
-        : latestAssistant?.querySelector?.('[data-message-model-slug], [data-model-slug], [data-model]');
-      let model = modelNode?.getAttribute('data-message-model-slug') || modelNode?.getAttribute('data-model-slug') || modelNode?.getAttribute('data-model') || '';
-      model = model.replace(/^gpt-(\\d+)-(\\d+)(?=-|$)/i, 'gpt-$1.$2');
-      return {ready:true, messages, model};
-    })()
-    """
-
-    private static let copyLatestResponseScript = """
-    (() => {
-      const assistants = [...document.querySelectorAll('[data-message-author-role="assistant"]')];
-      const node = assistants.at(-1) || [...document.querySelectorAll('article .markdown, article [class*="markdown"]')].at(-1);
-      if (!node) return {found:false};
-      const turn = node.closest('[data-testid^="conversation-turn-"]') || node.closest('article') || node.parentElement;
-      const content = node.querySelector('.markdown, [class*="markdown"]') || node;
-      const buttons = [...document.querySelectorAll('button')];
-      const stopButton = document.querySelector('[data-testid="stop-button"], [data-testid*="stop" i]') || buttons.find(button => {
-        const description = ((button.getAttribute('aria-label') || '') + ' ' +
-          (button.getAttribute('title') || '') + ' ' +
-          (button.getAttribute('data-testid') || '')).toLowerCase();
-        return /stop|stopp|abbrechen|cancel|generierung.*beenden|antwort.*(?:stoppen|abbrechen|beenden)/.test(description);
-      });
-      const streamingMarker = turn?.querySelector?.('[aria-busy="true"], [data-streaming="true"], [class*="streaming" i]');
-      const complete = !stopButton && !streamingMarker;
-
-      const richClone = content.cloneNode(true);
-      richClone.querySelectorAll('script, style, button').forEach(element => element.remove());
-      richClone.querySelectorAll('*').forEach(element => {
-        [...element.attributes].forEach(attribute => {
-          if (/^on/i.test(attribute.name) || ['contenteditable','data-state'].includes(attribute.name)) element.removeAttribute(attribute.name);
-        });
-      });
-      const source = richClone.cloneNode(true);
-      const replaceMath = (element, display) => {
-        const annotation = element.querySelector('annotation[encoding="application/x-tex"]');
-        const latex = (annotation?.textContent || '').trim();
-        if (!latex) return;
-        const replacement = document.createElement('span');
-        replacement.dataset.terminalLatex = `$$${latex}$$`;
-        replacement.dataset.terminalDisplay = display ? 'true' : 'false';
-        element.replaceWith(replacement);
-      };
-      [...source.querySelectorAll('.katex-display')].forEach(element => replaceMath(element, true));
-      [...source.querySelectorAll('.katex')].forEach(element => replaceMath(element, false));
-
-      const protectedBlocks = [];
-      const protect = value => {
-        const token = `TERMINALPROTECTED${protectedBlocks.length}TOKEN`;
-        protectedBlocks.push(value);
-        return token;
-      };
-      const children = element => [...element.childNodes].map(render).join('');
-      const inline = element => children(element).trim();
-      function render(current) {
-        if (current.nodeType === Node.TEXT_NODE) return current.nodeValue || '';
-        if (current.nodeType !== Node.ELEMENT_NODE) return '';
-        if (current.dataset?.terminalLatex) return current.dataset.terminalLatex;
-        const tag = current.tagName.toLowerCase();
-        if (tag === 'br') return '\\n';
-        if (tag === 'pre') {
-          const code = current.querySelector('code') || current;
-          const language = [...code.classList].map(name => name.match(/^language-(.+)$/)?.[1]).find(Boolean) || '';
-          return '\\n\\n' + protect('```' + language + '\\n' + (code.textContent || '').replace(/\\n$/, '') + '\\n```') + '\\n\\n';
-        }
-        if (tag === 'code') return '`' + (current.textContent || '') + '`';
-        if (tag === 'strong' || tag === 'b') return '**' + children(current) + '**';
-        if (tag === 'em' || tag === 'i') return '*' + children(current) + '*';
-        if (tag === 'del' || tag === 's') return '~~' + children(current) + '~~';
-        if (tag === 'a') return '[' + children(current) + '](' + (current.getAttribute('href') || '') + ')';
-        if (tag === 'img') return '![' + (current.getAttribute('alt') || '') + '](' + (current.getAttribute('src') || '') + ')';
-        if (/^h[1-6]$/.test(tag)) return '#'.repeat(Number(tag[1])) + ' ' + inline(current) + '\\n\\n';
-        if (tag === 'p') return children(current).trim() + '\\n\\n';
-        if (tag === 'blockquote') {
-          return children(current).trim().split('\\n').map(line => '> ' + line).join('\\n') + '\\n\\n';
-        }
-        if (tag === 'ul' || tag === 'ol') {
-          const items = [...current.children].filter(child => child.tagName.toLowerCase() === 'li');
-          return items.map((item,index) => {
-            const copy = item.cloneNode(true);
-            const nested = [...copy.children].filter(child => ['ul','ol'].includes(child.tagName.toLowerCase()));
-            nested.forEach(child => child.remove());
-            const prefix = tag === 'ol' ? `${index + 1}. ` : '- ';
-            const main = render(copy).trim().replace(/\\n+/g, ' ');
-            const below = nested.map(render).join('').trim();
-            return prefix + main + (below ? '\\n' + below.split('\\n').map(line => '  ' + line).join('\\n') : '');
-          }).join('\\n') + '\\n\\n';
-        }
-        if (tag === 'table') {
-          const rows = [...current.querySelectorAll('tr')].map(row =>
-            [...row.querySelectorAll(':scope > th, :scope > td')].map(cell => inline(cell).replace(/\\|/g, '\\|'))
-          ).filter(row => row.length);
-          if (!rows.length) return '';
-          const width = Math.max(...rows.map(row => row.length));
-          const normalized = rows.map(row => [...row, ...Array(width - row.length).fill('')]);
-          const header = normalized[0];
-          return '| ' + header.join(' | ') + ' |\\n| ' + header.map(() => '---').join(' | ') + ' |\\n' +
-            normalized.slice(1).map(row => '| ' + row.join(' | ') + ' |').join('\\n') + '\\n\\n';
-        }
-        if (tag === 'hr') return '---\\n\\n';
-        return children(current);
-      }
-      let markdown = render(source)
-        .replace(/[ \\t]+\\n/g, '\\n')
-        .replace(/\\n{3,}/g, '\\n\\n')
-        .trim();
-      protectedBlocks.forEach((value,index) => {
-        markdown = markdown.replace(`TERMINALPROTECTED${index}TOKEN`, value);
-      });
-
-      const turnButtons = [...(turn?.querySelectorAll('button') || [])];
-      const copyButton = turnButtons.find(button => {
-        const description = ((button.getAttribute('aria-label') || '') + ' ' +
-          (button.getAttribute('title') || '') + ' ' +
-          (button.getAttribute('data-testid') || '')).toLowerCase();
-        return /copy|kopieren/.test(description);
-      });
-      if (complete) copyButton?.click();
-      return {found:true, complete, clicked:complete && !!copyButton, markdown, html:richClone.innerHTML};
-    })()
-    """
-
-    private static func attachmentPresenceScript(fileNames: [String]) -> String {
-        guard let data = try? JSONSerialization.data(withJSONObject: fileNames),
-              let json = String(data: data, encoding: .utf8) else { return "false" }
-        return """
-        (() => {
-          const names = \(json).map(name => name.toLowerCase());
-          const prompt = document.querySelector('#prompt-textarea') || document.querySelector('textarea') || document.querySelector('[contenteditable="true"]');
-          const scope = prompt?.closest('form')?.parentElement || prompt?.parentElement?.parentElement || document;
-          const text = (scope.innerText || scope.textContent || '').toLowerCase();
-          if (names.some(name => text.includes(name))) return true;
-          return scope.querySelectorAll?.('[data-testid*="attachment"], [class*="attachment"], [aria-label$=".pdf" i]').length > 0;
-        })()
-        """
-    }
-
-    private static func uploadAttachmentsScript(attachments: [PendingAttachment]) -> String {
-        let payload = attachments.map { attachment in
-            [
-                "name": attachment.fileName,
-                "type": attachment.mimeType,
-                "base64": attachment.data.base64EncodedString()
-            ]
-        }
-        guard let data = try? JSONSerialization.data(withJSONObject: payload),
-              let json = String(data: data, encoding: .utf8) else { return "false" }
-        return """
-        (() => {
-          const files = \(json);
-          const inputs = [...document.querySelectorAll('input[type="file"]')];
-          const input = inputs.find(i => /image|pdf|png|jpe?g|webp|heic/i.test(i.accept || '')) || inputs.at(-1);
-          if (!input) return false;
-          const transfer = new DataTransfer();
-          for (const file of files) {
-            const raw = atob(file.base64);
-            const bytes = new Uint8Array(raw.length);
-            for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-            transfer.items.add(new File([bytes], file.name, {type:file.type, lastModified:Date.now()}));
-          }
-          try {
-            input.files = transfer.files;
-            input.dispatchEvent(new Event('input', {bubbles:true}));
-            input.dispatchEvent(new Event('change', {bubbles:true}));
-            return true;
-          } catch (_) {
-            return false;
-          }
-        })()
-        """
-    }
-
-    private static let openNativeUploadScript = """
-    (() => {
-      const inputs = [...document.querySelectorAll('input[type="file"]')];
-      const documentInput = inputs.find(i => {
-        const accept = (i.accept || '').toLowerCase();
-        return accept.includes('pdf') || accept.includes('application/') || (!accept.includes('image') && accept !== '');
-      });
-      if (documentInput) { documentInput.click(); return 'input'; }
-      const buttons = [...document.querySelectorAll('button')];
-      const add = document.querySelector('[data-testid="composer-plus-btn"], #composer-plus-btn') || buttons.find(b => /dateien und mehr|datei hinzufügen|add files|attach files|attachments|anhängen/i.test(
-        (b.getAttribute('aria-label') || '') + ' ' + (b.innerText || '') + ' ' + (b.getAttribute('data-testid') || '')
-      ));
-      if (!add) return 'none';
-      add.click();
-      return 'menu';
-    })()
-    """
-
-    private static let clickNativeUploadMenuItemScript = """
-    (() => {
-      const visible = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
-      const inputs = [...document.querySelectorAll('input[type="file"]')];
-      const documentInput = inputs.find(i => {
-        const accept = (i.accept || '').toLowerCase();
-        return accept.includes('pdf') || accept.includes('application/') || (!accept.includes('image') && accept !== '');
-      });
-      if (documentInput) { documentInput.click(); return true; }
-      const options = [...document.querySelectorAll('[role="menuitem"], [role="option"], [data-radix-menu-content] button')].filter(visible);
-      const item = options.find(e => {
-        const text = ((e.innerText || '') + ' ' + (e.getAttribute('aria-label') || '')).toLowerCase();
-        return /datei|file|computer|upload/.test(text);
-      });
-      if (!item) return false;
-      item.click();
-      return true;
-    })()
-    """
-
-    private static func prepareMessageScript(text: String) -> String {
-        """
-        (() => {
-          const text = \(jsString(text));
-          const p = document.querySelector('#prompt-textarea') || document.querySelector('textarea') || document.querySelector('[contenteditable="true"]');
-          if (!p) return false;
-          p.focus();
-          if (text) {
-            if (p.tagName === 'TEXTAREA') {
-              const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
-              setter ? setter.call(p, text) : (p.value = text);
-              p.dispatchEvent(new Event('input', {bubbles:true}));
-            } else {
-              document.execCommand('selectAll', false, null);
-              document.execCommand('insertText', false, text);
-              p.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data:text}));
-            }
-          }
-          return true;
-        })()
-        """
-    }
-
-    private static let beginSubmissionMonitorScript = """
-    (() => {
-      window.__terminalSubmission = {
-        baselineUsers: document.querySelectorAll('[data-message-author-role="user"]').length,
-        baselineAssistants: document.querySelectorAll('[data-message-author-role="assistant"]').length,
-        clicked: false,
-        lastClick: 0
-      };
-      return true;
-    })()
-    """
-
-    private static let submissionAttemptScript = """
-    (() => {
-      const state = window.__terminalSubmission;
-      if (!state) return {state:'waiting'};
-      const userCount = document.querySelectorAll('[data-message-author-role="user"]').length;
-      const assistantCount = document.querySelectorAll('[data-message-author-role="assistant"]').length;
-      if (assistantCount > state.baselineAssistants) return {state:'response'};
-      if (userCount > state.baselineUsers) return {state:'accepted'};
-
-      const prompt = document.querySelector('#prompt-textarea') || document.querySelector('textarea') || document.querySelector('[contenteditable="true"]');
-      const scope = prompt?.closest('form')?.parentElement || prompt?.parentElement?.parentElement || document;
-      const scopeText = (scope.innerText || scope.textContent || '').toLowerCase();
-      const progress = scope.querySelector?.('[role="progressbar"], [aria-busy="true"], progress');
-      const uploading = !!progress || /uploading|wird hochgeladen|lädt hoch|datei wird verarbeitet|processing file/.test(scopeText);
-      if (uploading) return {state:'uploading'};
-
-      const buttons = [...document.querySelectorAll('button')];
-      const send = document.querySelector('[data-testid="send-button"]') ||
-        buttons.find(b => /send|senden|submit/i.test((b.getAttribute('aria-label') || '') + ' ' + (b.getAttribute('data-testid') || '')));
-      const promptText = prompt ? ((prompt.value || prompt.innerText || prompt.textContent || '').trim()) : '';
-      if (state.clicked && !promptText && (!send || send.disabled)) return {state:'accepted'};
-      if (!send || send.disabled || send.getAttribute('aria-disabled') === 'true') return {state:'waiting'};
-
-      const now = Date.now();
-      if (now - state.lastClick < 1100) return {state:'waiting'};
-      send.click();
-      state.clicked = true;
-      state.lastClick = now;
-      return {state:'clicked'};
-    })()
-    """
-
-    private static let readinessScript = """
-    (() => {
-      if (window.__terminalReadyProbe) clearInterval(window.__terminalReadyProbe);
-      window.__terminalReadyProbe = setInterval(() => {
-        const p = document.querySelector('#prompt-textarea') || document.querySelector('textarea') || document.querySelector('[contenteditable="true"]');
-        if (p) window.webkit.messageHandlers.terminalBridge.postMessage({type:'ready', url:location.href});
-      }, 1500);
-      return true;
-    })()
-    """
-
-    private static func responseObserverScript(responseID: String) -> String {
-    """
-    (() => {
-      const responseID = \(jsString(responseID));
-      if (window.__terminalResponseObserver) window.__terminalResponseObserver.disconnect();
-      const initialRoleNodes = [...document.querySelectorAll('[data-message-author-role="assistant"]')];
-      const initialMarkdownNodes = [...document.querySelectorAll('article .markdown, article [class*="markdown"]')];
-      const initialNodes = new Set([...initialRoleNodes, ...initialMarkdownNodes]);
-      let lastHTML = '';
-      let stableTicks = 0;
-      let lastChangeAt = Date.now();
-      let lastStreaming = true;
-      let finalSentAt = 0;
-      let observedTurn = null;
-      const extract = (force = false) => {
-        const roleNodes = [...document.querySelectorAll('[data-message-author-role="assistant"]')];
-        const markdownNodes = [...document.querySelectorAll('article .markdown, article [class*="markdown"]')];
-        const newRoleNodes = roleNodes.filter(node => !initialNodes.has(node));
-        const newMarkdownNodes = markdownNodes.filter(node => !initialNodes.has(node));
-        const node = newRoleNodes.at(-1) || newMarkdownNodes.at(-1);
-        if (!node) return;
-        const buttons = [...document.querySelectorAll('button')];
-        const stop = document.querySelector('[data-testid="stop-button"], [data-testid*="stop" i], button[aria-label*="Stop" i], button[aria-label*="Stopp" i]') || buttons.find(button => {
-          const label = ((button.getAttribute('aria-label') || '') + ' ' + (button.getAttribute('title') || '') + ' ' + (button.getAttribute('data-testid') || '')).toLowerCase();
-          return /stop|stopp|abbrechen|cancel|generierung.*beenden|antwort.*(?:stoppen|abbrechen|beenden)/.test(label);
-        });
-        const content = node.querySelector('.markdown, [class*="markdown"]') || node;
-        const clone = content.cloneNode(true);
-        clone.querySelectorAll('script, style, button').forEach(n => n.remove());
-        clone.querySelectorAll('*').forEach(n => {
-          [...n.attributes].forEach(a => {
-            if (/^on/i.test(a.name) || ['contenteditable','data-state'].includes(a.name)) n.removeAttribute(a.name);
-          });
-        });
-        const html = clone.innerHTML;
-        if (!html.trim()) return;
-        const turn = node.closest('article') || node.closest('[data-testid^="conversation-turn-"]') || node;
-        observedTurn = turn;
-        const streamingMarker = turn.querySelector?.('[aria-busy="true"], [data-streaming="true"], [class*="streaming" i]');
-        const activelyGenerating = !!stop || !!streamingMarker;
-        const modelElement = turn.matches?.('[data-message-model-slug], [data-model-slug], [data-model]') ? turn :
-          turn.querySelector?.('[data-message-model-slug], [data-model-slug], [data-model]');
-        let model = modelElement?.getAttribute('data-message-model-slug') ||
-          modelElement?.getAttribute('data-model-slug') || modelElement?.getAttribute('data-model') || '';
-        if (!model) {
-          const markup = turn.outerHTML || '';
-          const match = markup.match(/data-(?:message-)?model(?:-slug)?=["']([^"']+)["']/i);
-          if (match) model = match[1];
-        }
-        model = model.replace(/^gpt-(\\d+)-(\\d+)(?=-|$)/i, 'gpt-$1.$2');
-        const changed = html !== lastHTML;
-        if (changed) {
-          stableTicks = 0;
-          lastChangeAt = Date.now();
-          finalSentAt = 0;
-        } else {
-          stableTicks += 1;
-        }
-        lastHTML = html;
-
-        // Copy/rating controls are ChatGPT's most reliable indication that a
-        // turn has completed. If their markup changes, a conservative quiet
-        // period prevents pauses during reasoning from truncating the answer.
-        const actionButtons = [...(turn.querySelectorAll?.('button') || [])];
-        const hasCompletionControls = !!turn.querySelector?.('[data-testid*="copy" i], [data-testid*="feedback" i]') || actionButtons.some(button => {
-          const label = ((button.getAttribute('aria-label') || '') + ' ' + (button.getAttribute('data-testid') || '')).toLowerCase();
-          return /copy|kopieren|good response|bad response|gute antwort|schlechte antwort/.test(label);
-        });
-        const quietFor = Date.now() - lastChangeAt;
-        const streaming = activelyGenerating || (hasCompletionControls ? quietFor < 1800 : quietFor < 12000);
-        if (force || changed || streaming !== lastStreaming || (!streaming && !finalSentAt)) {
-          window.webkit.messageHandlers.terminalBridge.postMessage({type:'assistant', id:responseID, html, streaming, generating:activelyGenerating, changed, model});
-        }
-        lastStreaming = streaming;
-        if (!streaming && !finalSentAt) finalSentAt = Date.now();
-
-        // Stop only the periodic polling after an apparent end. The lightweight
-        // MutationObserver remains alive until the next prompt, so even a very
-        // long thinking pause cannot truncate a later continuation.
-        if (!streaming && finalSentAt && Date.now() - finalSentAt > 3000 && window.__terminalResponseTimer) {
-          clearInterval(window.__terminalResponseTimer);
-          window.__terminalResponseTimer = null;
-        }
-      };
-      const scheduleMutationExtract = mutations => {
-        // The hidden ChatGPT page changes constantly. Once the active answer
-        // is known, ignore unrelated mutations so the grace period stays
-        // passive and cannot pressure the visible terminal UI.
-        if (observedTurn && observedTurn.isConnected) {
-          const relevant = mutations.some(mutation =>
-            observedTurn.contains(mutation.target) ||
-            [...mutation.addedNodes].some(node => node === observedTurn || (node.nodeType === 1 && node.contains?.(observedTurn)))
-          );
-          if (!relevant) return;
-        }
-        if (window.__terminalResponseMutationTimer) return;
-        window.__terminalResponseMutationTimer = setTimeout(() => {
-          window.__terminalResponseMutationTimer = null;
-          extract(false);
-        }, 250);
-      };
-      window.__terminalResponseObserver = new MutationObserver(scheduleMutationExtract);
-      window.__terminalResponseExtract = extract;
-      window.__terminalResponseObserver.observe(document.body, {subtree:true, childList:true, characterData:true});
-      if (window.__terminalResponseTimer) clearInterval(window.__terminalResponseTimer);
-      window.__terminalResponseTimer = setInterval(extract, 700);
-      extract();
-      return true;
-    })()
-    """
-    }
-
-    private static let stopResponseObserverScript = """
-    (() => {
-      window.__terminalResponseObserver?.disconnect();
-      window.__terminalResponseObserver = null;
-      window.__terminalResponseExtract = null;
-      if (window.__terminalResponseMutationTimer) clearTimeout(window.__terminalResponseMutationTimer);
-      window.__terminalResponseMutationTimer = null;
-      if (window.__terminalResponseTimer) clearInterval(window.__terminalResponseTimer);
-      window.__terminalResponseTimer = null;
-      return true;
-    })()
-    """
-
-    private static let stopCurrentOperationScript = """
-    (() => {
-      window.__terminalSubmission = null;
-      window.__terminalResponseObserver?.disconnect();
-      window.__terminalResponseObserver = null;
-      window.__terminalResponseExtract = null;
-      if (window.__terminalResponseMutationTimer) clearTimeout(window.__terminalResponseMutationTimer);
-      window.__terminalResponseMutationTimer = null;
-      if (window.__terminalResponseTimer) clearInterval(window.__terminalResponseTimer);
-      window.__terminalResponseTimer = null;
-
-      const buttons = [...document.querySelectorAll('button')];
-      const stop = document.querySelector('[data-testid="stop-button"]') || buttons.find(b =>
-        /stop|stopp|generierung beenden/i.test((b.getAttribute('aria-label') || '') + ' ' + (b.getAttribute('data-testid') || ''))
-      );
-      stop?.click();
-
-      const prompt = document.querySelector('#prompt-textarea') || document.querySelector('textarea') || document.querySelector('[contenteditable="true"]');
-      const scope = prompt?.closest('form')?.parentElement || prompt?.parentElement?.parentElement;
-      [...(scope?.querySelectorAll('button') || [])].forEach(button => {
-        const label = ((button.getAttribute('aria-label') || '') + ' ' + (button.getAttribute('data-testid') || '')).toLowerCase();
-        if (/(remove|entfernen).*(file|datei|attachment|anhang|upload)|(file|datei|attachment|anhang|upload).*(remove|entfernen)/.test(label)) button.click();
-      });
-
-      if (prompt) {
-        if (prompt.tagName === 'TEXTAREA') prompt.value = '';
-        else prompt.textContent = '';
-        prompt.dispatchEvent(new Event('input', {bubbles:true}));
-      }
-      return true;
-    })()
-    """
-
-    private static func modelSelectionScript(choice: String) -> String {
-        """
-        (() => {
-          const wanted = \(jsString(choice)).toLowerCase();
-          const visible = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
-          const buttons = [...document.querySelectorAll('button')].filter(visible);
-          const trigger = buttons.find(b => /model|modell|chatgpt|auto|instant|thinking|pro/i.test((b.innerText || '') + ' ' + (b.getAttribute('aria-label') || '')));
-          if (!trigger) return false;
-          trigger.click();
-          setTimeout(() => {
-            const options = [...document.querySelectorAll('[role="menuitem"], [role="option"], button')].filter(visible);
-            const option = options.find(e => (e.innerText || '').toLowerCase().includes(wanted));
-            if (option) option.click();
-          }, 500);
-          return true;
-        })()
-        """
-    }
-
-    private static let terminalHTML = """
-    <!doctype html><html><head><meta charset="utf-8">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
-    <style>
-      :root { color-scheme: dark; }
-      * { box-sizing: border-box; }
-      html, body { margin:0; min-height:100%; background:#0e110f; color:#e8eadf; overflow-anchor:none; }
-      body { padding:18px 20px 34px; font:14px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
-      #empty { color:#758078; padding-top:4px; }
-      .message { margin:0 0 22px; }
-      .label { color:#b8eb60; font-weight:700; margin-bottom:5px; }
-      .user { display:grid; grid-template-columns:max-content minmax(0,1fr); column-gap:10px; align-items:baseline; }
-      .user .label { margin:0; }
-      .user .body { min-width:0; }
-      .assistant .label { color:#69d5d0; }
-      .body { overflow-wrap:anywhere; }
-      .assistant .body { font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size:14px; line-height:1.55; }
-      .assistant .body :not(.katex):not(.katex *) { font-family:inherit; }
-      .assistant .body code, .assistant .body pre { font-family:inherit; }
-      p { margin:.45em 0 .85em; } h1,h2,h3 { color:#f0f3e8; margin:1.15em 0 .45em; line-height:1.25; }
-      h1 { font-size:1.38em; } h2 { font-size:1.22em; } h3 { font-size:1.08em; }
-      pre { background:#171c19; border:1px solid #303a33; border-radius:7px; padding:12px; overflow:auto; white-space:pre; }
-      code { color:#eadf9b; background:#171c19; padding:.12em .3em; border-radius:4px; }
-      pre code { color:#e8eadf; background:transparent; padding:0; }
-      blockquote { margin:.8em 0; border-left:3px solid #7a9d45; padding:.2em 0 .2em 12px; color:#c5ccbf; }
-      table { border-collapse:collapse; width:100%; margin:.8em 0; } th,td { border:1px solid #39423b; padding:7px 9px; text-align:left; }
-      a { color:#79c8ff; } img { max-width:100%; border-radius:7px; }
-      .image-badge { display:inline-block; color:#d2e99d; border:1px solid #627a3d; border-radius:5px; padding:2px 7px; margin-top:4px; }
-      .transfer-status { color:#d9bd67; margin:-12px 0 20px; }
-      .boot { margin:0 0 24px; color:#aeb7ad; }
-      .boot-command { color:#e8eadf; }
-      .boot-prompt { color:#b8eb60; font-weight:700; }
-      .boot-step { color:#758078; }
-      .boot-ok { color:#69d5d0; }
-      .boot-model { color:#eadf9b; font-weight:700; }
-      .katex-display { overflow-x:auto; overflow-y:hidden; padding:.35em 0; }
-      mark.terminal-search-hit { color:inherit; background:#7c6d2b; border-radius:3px; padding:0 .08em; }
-      mark.terminal-search-hit.current { background:#c4a83c; color:#11140f; outline:1px solid #eadf9b; }
-      html[data-theme="blue"], html[data-theme="blue"] body { background:#0e110f; color:#e7ebf4; }
-      html[data-theme="blue"] #empty, html[data-theme="blue"] .boot-step { color:#7582a3; }
-      html[data-theme="blue"] .label, html[data-theme="blue"] .boot-prompt { color:#93afe5; }
-      html[data-theme="blue"] .assistant .label, html[data-theme="blue"] .boot-ok { color:#8abfd2; }
-      html[data-theme="blue"] h1, html[data-theme="blue"] h2, html[data-theme="blue"] h3 { color:#f0f3fa; }
-      html[data-theme="blue"] pre, html[data-theme="blue"] code { background:#0b1838; }
-      html[data-theme="blue"] pre { border-color:#25365f; }
-      html[data-theme="blue"] pre code { background:transparent; color:#e7ebf4; }
-      html[data-theme="blue"] code, html[data-theme="blue"] .boot-model { color:#b7c8e8; }
-      html[data-theme="blue"] blockquote { border-left-color:#5877b7; color:#c4ccdd; }
-      html[data-theme="blue"] th, html[data-theme="blue"] td { border-color:#2b3b65; }
-      html[data-theme="blue"] a { color:#80b8e8; }
-      html[data-theme="blue"] .image-badge { color:#c0cee8; border-color:#4b6191; }
-      html[data-theme="blue"] .transfer-status { color:#b7c5df; }
-      html[data-theme="blue"] mark.terminal-search-hit { background:#334b82; }
-      html[data-theme="blue"] mark.terminal-search-hit.current { background:#86a8ea; color:#07102d; outline-color:#c9d8f5; }
-    </style></head><body><div id="empty"></div><div id="log"></div>
-    <script>
-      const log = document.getElementById('log'), empty = document.getElementById('empty');
-      let persistenceEnabled = false, snapshotTimer = null;
-      const queueSnapshot = () => {
-        if (!persistenceEnabled) return;
-        if (snapshotTimer) clearTimeout(snapshotTimer);
-        snapshotTimer = setTimeout(() => {
-          snapshotTimer = null;
-          const snapshot=log.cloneNode(true);
-          snapshot.querySelectorAll('mark.terminal-search-hit').forEach(mark=>mark.replaceWith(document.createTextNode(mark.textContent || '')));
-          snapshot.normalize();
-          window.webkit.messageHandlers.terminalStateBridge.postMessage({
-            html:snapshot.innerHTML,
-            model:window.terminal?.currentModel || 'detecting …'
-          });
-        },350);
-      };
-      const nearBottom = () => document.documentElement.scrollHeight - window.innerHeight - window.scrollY <= 24;
-      let followTail = true;
-      window.addEventListener('scroll', () => { followTail = nearBottom(); }, {passive:true});
-      const scrollBottom = (force=false) => {
-        if (!force && !followTail) return;
-        followTail = true;
-        window.scrollTo({top:document.documentElement.scrollHeight, behavior:'auto'});
-      };
-      const preserveReadingPosition = update => {
-        const wasFollowing = followTail;
-        const previousY = window.scrollY;
-        update();
-        if (wasFollowing) scrollBottom(true);
-        else {
-          followTail = false;
-          window.scrollTo({top:previousY, behavior:'auto'});
-        }
-      };
-      const typesetMath = root => {
-        if (typeof renderMathInElement !== 'function') return true;
-        const slash=String.fromCharCode(92);
-        try {
-          renderMathInElement(root, {
-            delimiters:[
-              {left:'$$',right:'$$',display:true},
-              {left:slash+'[',right:slash+']',display:true},
-              {left:slash+'(',right:slash+')',display:false},
-              {left:'$',right:'$',display:false}
-            ],
-            ignoredClasses:['katex','katex-display','katex-html','katex-mathml'],
-            throwOnError:false,
-            strict:'ignore'
-          });
-        } catch (_) { return false; }
-        return !root.querySelector('.katex-error');
-      };
-      const searchState={query:'',marks:[],index:-1};
-      const clearSearchHighlights=()=>{
-        document.querySelectorAll('mark.terminal-search-hit').forEach(mark=>mark.replaceWith(document.createTextNode(mark.textContent || '')));
-        log.normalize();
-        searchState.marks=[];
-        searchState.index=-1;
-      };
-      const searchPayload=()=>({count:searchState.marks.length,index:searchState.index});
-      const selectSearchHit=index=>{
-        if(!searchState.marks.length){ searchState.index=-1; return searchPayload(); }
-        searchState.index=((index % searchState.marks.length)+searchState.marks.length)%searchState.marks.length;
-        searchState.marks.forEach((mark,i)=>mark.classList.toggle('current',i===searchState.index));
-        const target=searchState.marks[searchState.index];
-        followTail=false;
-        target.scrollIntoView({block:'center',inline:'nearest',behavior:'auto'});
-        return searchPayload();
-      };
-      window.terminal = {
-        currentModel:'detecting …',
-        setTheme(theme){ document.documentElement.dataset.theme=theme === 'blue' ? 'blue' : 'dark'; },
-        restore(html,model){
-          this.currentModel=model || this.currentModel;
-          log.innerHTML=html || '';
-          empty.style.display=log.children.length ? 'none' : 'block';
-          followTail=true;
-          setTimeout(()=>scrollBottom(true),0);
-        },
-        enablePersistence(){ persistenceEnabled=true; queueSnapshot(); },
-        clear(){ searchState.query=''; searchState.marks=[]; searchState.index=-1; followTail=true; log.innerHTML=''; empty.style.display='block'; window.scrollTo({top:0,behavior:'auto'}); },
-        jumpToBottom(){ followTail=true; scrollBottom(true); },
-        clearSearch(){ searchState.query=''; clearSearchHighlights(); return searchPayload(); },
-        search(query){
-          clearSearchHighlights();
-          searchState.query=(query || '').trim();
-          if(!searchState.query) return searchPayload();
-          const needle=searchState.query.toLocaleLowerCase();
-          const walker=document.createTreeWalker(log,NodeFilter.SHOW_TEXT,{acceptNode(node){
-            const parent=node.parentElement;
-            if(!parent || !node.nodeValue || !parent.closest('.body,.boot')) return NodeFilter.FILTER_REJECT;
-            if(parent.closest('.label,.katex,script,style,mark.terminal-search-hit')) return NodeFilter.FILTER_REJECT;
-            return node.nodeValue.toLocaleLowerCase().includes(needle) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
-          }});
-          const nodes=[];
-          while(walker.nextNode()) nodes.push(walker.currentNode);
-          nodes.forEach(node=>{
-            const value=node.nodeValue || '';
-            const lower=value.toLocaleLowerCase();
-            let cursor=0,match=lower.indexOf(needle);
-            if(match<0) return;
-            const fragment=document.createDocumentFragment();
-            while(match>=0){
-              if(match>cursor) fragment.appendChild(document.createTextNode(value.slice(cursor,match)));
-              const mark=document.createElement('mark');
-              mark.className='terminal-search-hit';
-              mark.textContent=value.slice(match,match+searchState.query.length);
-              fragment.appendChild(mark);
-              searchState.marks.push(mark);
-              cursor=match+searchState.query.length;
-              match=lower.indexOf(needle,cursor);
-            }
-            if(cursor<value.length) fragment.appendChild(document.createTextNode(value.slice(cursor)));
-            node.replaceWith(fragment);
-          });
-          return searchState.marks.length ? selectSearchHit(0) : searchPayload();
-        },
-        searchStep(delta){ return selectSearchHit(searchState.index+(delta < 0 ? -1 : 1)); },
-        boot(model){
-          this.currentModel=model || this.currentModel;
-          empty.style.display='none';
-          const e=document.createElement('section'); e.className='boot'; e.dataset.boot='true';
-          e.innerHTML='<div class="boot-command"><span class="boot-prompt">$</span> pip \(terminalAddress)</div><div class="boot-lines"></div>';
-          log.appendChild(e); const lines=e.querySelector('.boot-lines'); scrollBottom();
-          setTimeout(()=>{ lines.insertAdjacentHTML('beforeend','<div class="boot-step">[1/3] loading authenticated session …</div>'); scrollBottom(); },160);
-          setTimeout(()=>{ lines.insertAdjacentHTML('beforeend','<div class="boot-step">[2/3] mounting multimodal transport …</div>'); scrollBottom(); },360);
-          setTimeout(()=>{ lines.insertAdjacentHTML('beforeend','<div class="boot-ok">[3/3] terminal ready ✓</div>'); scrollBottom(); },590);
-          setTimeout(()=>{ const row=document.createElement('div'); row.innerHTML='current model: <span class="boot-model"></span>'; row.querySelector('.boot-model').textContent=terminal.currentModel; lines.appendChild(row); scrollBottom(); },780);
-        },
-        setModel(model){ this.currentModel=model; const target=[...document.querySelectorAll('.boot-model')].at(-1); if(target) target.textContent=model; },
-        addUser(html){ empty.style.display='none'; const e=document.createElement('section'); e.className='message user'; e.innerHTML='<div class="label">INPUT &gt;</div><div class="body">'+html+'</div>'; log.appendChild(e); scrollBottom(); },
-        setTransferStatus(text){ let e=document.querySelector('.transfer-status'); if(!text){ e?.remove(); return; } if(!e){ e=document.createElement('div'); e.className='transfer-status'; log.appendChild(e); } e.textContent=text; scrollBottom(); },
-        beginAssistant(id){ empty.style.display='none'; const e=document.createElement('section'); e.className='message assistant'; e.dataset.id=id; e.innerHTML='<div class="label">CHATGPT &gt;</div><div class="body"></div>'; log.appendChild(e); scrollBottom(); },
-        beginThinking(id){ let e=[...document.querySelectorAll('.assistant')].find(x=>x.dataset.id===id); if(!e){ this.beginAssistant(id); e=[...document.querySelectorAll('.assistant')].at(-1); } preserveReadingPosition(()=>{ e.querySelector('.body').textContent='Denke nach …'; }); },
-        updateAssistant(id,html,streaming){
-          let e=[...document.querySelectorAll('.assistant')].find(x=>x.dataset.id===id);
-          if(!e){ this.beginAssistant(id); e=[...document.querySelectorAll('.assistant')].at(-1); }
-          const body=e.querySelector('.body');
-          const staged=document.createElement('div');
-          staged.innerHTML=html;
-          if(!typesetMath(staged)) return false;
-          preserveReadingPosition(()=>{
-            body.replaceChildren(...staged.childNodes);
-            body.dataset.renderStable='true';
-          });
-          return true;
-        }
-      };
-      new MutationObserver(queueSnapshot).observe(log,{subtree:true,childList:true,characterData:true,attributes:true});
-      terminal.boot('detecting …');
-    </script></body></html>
-    """
-}
-
-final class AppDelegate: NSObject, NSApplicationDelegate {
-    private var controller: TerminalController?
-    private var statusItem: NSStatusItem?
-
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
-        configureMainMenu()
-        controller = TerminalController()
-        configureStatusItem()
-#if BETA_BUILD
-        if ProcessInfo.processInfo.arguments.contains("--external-selection-self-test") {
-            controller?.runExternalSelectionSelfTest()
-        } else if ProcessInfo.processInfo.arguments.contains("--selection-self-test") {
-            controller?.runSelectionSelfTest()
-        } else {
-            controller?.showWindow()
-        }
-#else
-        controller?.showWindow()
-#endif
-    }
-
-    private func configureMainMenu() {
-        let mainMenu = NSMenu()
-        let appItem = NSMenuItem(); mainMenu.addItem(appItem)
-        let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "ChatGPT Terminal ausblenden", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
-        appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "ChatGPT Terminal beenden", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        appItem.submenu = appMenu
-
-        let editItem = NSMenuItem(); mainMenu.addItem(editItem)
-        let edit = NSMenu(title: "Bearbeiten")
-        edit.addItem(withTitle: "Widerrufen", action: Selector(("undo:")), keyEquivalent: "z")
-        edit.addItem(withTitle: "Wiederholen", action: Selector(("redo:")), keyEquivalent: "Z")
-        edit.addItem(.separator())
-        edit.addItem(withTitle: "Ausschneiden", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        edit.addItem(withTitle: "Kopieren", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        edit.addItem(withTitle: "Einfügen", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        edit.addItem(withTitle: "Alles auswählen", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
-        editItem.submenu = edit
-        NSApp.mainMenu = mainMenu
-    }
-
-    private func configureStatusItem() {
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        item.button?.image = NSImage(systemSymbolName: "apple.terminal.fill", accessibilityDescription: "ChatGPT Terminal")
-        let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Terminal öffnen", action: #selector(show), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Screenshot aufnehmen", action: #selector(screenshot), keyEquivalent: ""))
-        menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Beenden", action: #selector(quit), keyEquivalent: "q"))
-        item.menu = menu
-        statusItem = item
-    }
-
-    @objc private func show() { controller?.showWindow() }
-    @objc private func screenshot() { controller?.captureScreenshot() }
-    @objc private func quit() { NSApp.terminate(nil) }
-}
-
-@main
-struct ChatGPTTerminalV3App {
-    static func main() {
-        let app = NSApplication.shared
-        let delegate = AppDelegate()
-        app.delegate = delegate
-        app.run()
-    }
 }

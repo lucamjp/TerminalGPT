@@ -13,19 +13,6 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "ChatGPTTerminal",
-            path: ".",
-            exclude: [
-                ".vscode",
-                ".build",
-                "build",
-                "Tests",
-                "scripts",
-                "Info.plist",
-                "Info.Beta.plist",
-                "README.md",
-                "ChatGPT Terminal.code-workspace"
-            ],
-            sources: ["main.swift"],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("ApplicationServices"),

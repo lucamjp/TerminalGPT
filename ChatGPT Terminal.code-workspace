@@ -14,5 +14,29 @@
       "**/.build": true,
       "**/build": true
     }
+  },
+  "launch": {
+    "configurations": [
+      {
+        "type": "swift",
+        "request": "launch",
+        "args": [],
+        "cwd": "${workspaceFolder:ChatGPT Terminal}",
+        "name": "Debug ChatGPTTerminal (ChatGPT Terminal)",
+        "target": "ChatGPTTerminal",
+        "configuration": "debug",
+        "preLaunchTask": "swift: Build Debug ChatGPTTerminal (ChatGPT Terminal)"
+      },
+      {
+        "type": "swift",
+        "request": "launch",
+        "args": [],
+        "cwd": "${workspaceFolder:ChatGPT Terminal}",
+        "name": "Release ChatGPTTerminal (ChatGPT Terminal)",
+        "target": "ChatGPTTerminal",
+        "configuration": "release",
+        "preLaunchTask": "swift: Build Release ChatGPTTerminal (ChatGPT Terminal)"
+      }
+    ]
   }
 }

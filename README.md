@@ -1,76 +1,48 @@
-# ChatGPT Terminal
+# ChatGPT floating client without API for macOS>14
 
-Native macOS-Terminaloberfläche für eine bestehende, angemeldete ChatGPT-Websitzung. Die Oberfläche ist mit AppKit gebaut; Chatverlauf und ChatGPT-Sitzung laufen in getrennten `WKWebView`-Instanzen.
+A small fully-LLM-produced floating ChatGPT client for macOS with a terminal-style interface. uses signed-in ChatGPT web session (login stays in macOS WebKit data store). No API. There are some features like search (cmd F), two color themes, file input, screenshot shortcut, text "copy paste" shortcut, conversation history, command line "\new" for new chat, command line "\cd last" for last found chat", command line "\clear” for fresh terminal. MacOS will ask for permission that the client can use the shortcut stuff.
 
-Autor: Luca Prior
+Current version: **3.3.3 (Build 34)**
 
-## Aktueller Stand
+If current `chatgpt.com` UI changes then it will probably break in some features. You can just ask LLM to update it.
 
-- Hauptversion: 3.3.3, Build 34
-- Beta-Variante im Quellcode: 3.3.2, Build 33
-- Mindestversion: macOS 14
-- Hauptdatei: `main.swift`
-
-Die installierte Hauptversion unter `/Applications/ChatGPT Terminal.app` ist nicht Teil des Entwicklungsablaufs. Entwicklung und manuelle Tests erfolgen mit der separat gebauten Beta-App.
-
-## In VS Code öffnen
-
-Öffne `ChatGPT Terminal.code-workspace`. Empfohlene Erweiterungen werden von VS Code angeboten:
-
-- Swift
-- CodeLLDB
-
-Über **Terminal → Run Task** stehen Builds, Typecheck und Beta-Start bereit. Der Standard-Build ist **Build: Beta (Debug)**.
-
-## Befehle
+[![Build](https://github.com/lucamjp/TerminalV3/actions/workflows/build.yml/badge.svg)](https://github.com/lucamjp/TerminalV3/actions/workflows/build.yml)
 
 ```sh
+git clone https://github.com/lucamjp/TerminalV3.git
+cd TerminalV3
+./scripts/build.sh release main
+```
+
+.app file is the build thing.
+
+
+Useful:
+
+```sh
+swift build
+./scripts/typecheck.sh
 ./scripts/build.sh debug beta
 ./scripts/run-beta.sh
-./scripts/typecheck.sh
-swift build
 ```
 
-Ein Main-Build kann erzeugt werden, wird aber nicht installiert:
 
-```sh
-./scripts/build.sh debug main
-```
+## Some shortcuts
 
-Die Apps landen unter `build/beta-debug` beziehungsweise `build/main-debug`.
+| `⌥ Space` | Show or hide |
+| `⌥⇧4` | Capture a screenshot |
+| `⌘ Return` | Send |
+| `⌥⇧C` | Copy the latest answer |
+| `⌘⇧C` | Insert selected text from another app |
+| `⌘F` | Search the transcript |
+| `⌘↓` | Jump to the latest output |
+| `Esc` | Hide the window |
 
-## Signierung und macOS-Rechte
+## Some commands
 
-Entwicklungs-Builds werden standardmäßig ad hoc signiert. Nach einem neuen Build kann macOS deshalb Bedienungshilfen- oder Bildschirmaufnahme-Rechte erneut verlangen.
-
-Falls der lokale Signaturschlüssel bereits im Schlüsselbund entsperrt ist, kann stabil signiert werden:
-
-```sh
-SIGN_MODE=local ./scripts/build.sh release beta
-```
-
-Im Repository werden weder Schlüsselbund-Passwort noch private Zertifikatsdaten gespeichert. Bei einer Passwortabfrage den Schlüsselbund über die Schlüsselbundverwaltung entsperren.
-
-## Varianten
-
-Der Compiler-Schalter `BETA_BUILD` trennt Beta und Main. Die Beta besitzt eine eigene Bundle-ID und einen eigenen globalen Shortcut für die Textübernahme. `Info.plist` gehört zur Hauptversion, `Info.Beta.plist` zur Beta.
-
-## Architekturhinweise
-
-- AppKit steuert Fenster, Eingabe, Anhänge, Shortcuts und Verlauf.
-- WebKit hält die angemeldete ChatGPT-Sitzung und rendert den Terminal-Verlauf.
-- Text, Bilder und PDFs werden über die ChatGPT-Weboberfläche übergeben.
-- Antworten und Kopierformatierung werden aus dem DOM der Hintergrundsitzung gelesen.
-- Die DOM-Automation ist absichtlich gekapselt, bleibt aber von Änderungen der ChatGPT-Weboberfläche abhängig.
-- Globale Shortcuts und die Übernahme einer Auswahl aus anderen Apps benötigen Bedienungshilfen-Rechte.
-- Die Screenshot-Funktion benötigt die macOS-Bildschirmaufnahme-Berechtigung.
-
-## Auswahl-Testhelfer
-
-Der kleine Testhelfer stellt außerhalb des Terminals markierten Text bereit:
-
-```sh
-./scripts/build-selection-probe.sh
-```
-
-Er wird nach `/private/tmp/ChatGPT Selection Probe` gebaut und verändert weder Haupt- noch Beta-App.
+| Command | Action |
+| --- | --- |
+| `\clear` | Clear the terminal view |
+| `\new` | Start a new chat |
+| `\cd last` | Open the previous chat |
+| `\stop` | Stop the current request or upload |

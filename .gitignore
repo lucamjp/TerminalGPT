@@ -3,6 +3,8 @@ build/
 .swiftpm/
 .DS_Store
 *.xcuserstate
+DerivedData/
+.idea/
 .env
 .env.*
 outputs/

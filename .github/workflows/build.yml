@@ -1,0 +1,24 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Swift version
+        run: swift --version
+      - name: SwiftPM build
+        run: swift build
+      - name: Typecheck
+        run: ./scripts/typecheck.sh
+      - name: Build main app
+        run: ./scripts/build.sh release main
+      - name: Build beta app
+        run: ./scripts/build.sh release beta
